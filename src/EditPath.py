@@ -1,10 +1,14 @@
 from torch_geometric.datasets import TUDataset
+import csv
+import os
 
 class EditPath:
-    def __init__(self, start_graph_id, target_graph_id, dataset_name, prediction=None, length=None):
+    def __init__(self, start_graph_id, target_graph_id, dataset_name, method, dataset, prediction=None, length=None):
         self.start_graph_id = start_graph_id
         self.target_graph_id = target_graph_id
         self.dataset_name = dataset_name
+        self.method = method
+        self.dataset = dataset
         self.prediction = []
         self.length = 0
         self.number_of_flips = 0
@@ -13,6 +17,9 @@ class EditPath:
         self.number_of_edges_start = 0
         self.number_of_nodes_target = 0
         self.number_of_nodes_target = 0
+        self.ged = 0
+        self.start_graph_label = dataset[start_graph_id].y.item()
+        self.target_graph_label = dataset[target_graph_id].y.item()
         
     def countFlips(self):
         for i, pr in enumerate(self.prediction):
@@ -21,8 +28,29 @@ class EditPath:
                     self.number_of_flips += 1
 
     def analyzeStartTargetGraphs(self):
-        dataset = TUDataset(root='./data', name=self.dataset_name)
-        self.number_of_nodes_start = dataset[self.start_graph_id].num_nodes
-        self.number_of_edges_start = dataset[self.start_graph_id].num_edges / 2
-        self.number_of_nodes_target = dataset[self.target_graph_id].num_nodes
-        self.number_of_edges_target = dataset[self.target_graph_id].num_edges / 2
+        self.number_of_nodes_start = self.dataset[self.start_graph_id].num_nodes
+        self.number_of_edges_start = self.dataset[self.start_graph_id].num_edges / 2
+        self.number_of_nodes_target = self.dataset[self.target_graph_id].num_nodes
+        self.number_of_edges_target = self.dataset[self.target_graph_id].num_edges / 2
+
+    def readGED(self):
+        path = os.path.join("data", "Results", "Mappings", self.method, self.dataset_name, f"{self.dataset_name}_ged_mapping.csv")
+        with open(path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)    
+            for row in reader:
+                start_id = int(row["source_id"])
+                target_id = int(row[" target_id"])
+                if (start_id == self.start_graph_id and target_id == self.target_graph_id):
+                    self.ged = int(row[" approximated distance"])  
+                    return  
+                
+    def doFirstFlip(self):
+        flip_index = next(
+            (i for i in range(1, len(self.prediction)) if self.prediction[i] != self.prediction[i-1]),
+            None
+        )
+        if(flip_index != None ): 
+            self.first_flip_relative = (flip_index+1)
+        else:
+            self.first_flip_relative = None
+
