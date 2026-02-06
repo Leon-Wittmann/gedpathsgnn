@@ -3,7 +3,7 @@ import csv
 import os
 
 class EditPath:
-    def __init__(self, start_graph_id, target_graph_id, dataset_name, method, dataset, prediction=None, length=None):
+    def __init__(self, start_graph_id, target_graph_id, dataset_name, method, dataset):
         self.start_graph_id = start_graph_id
         self.target_graph_id = target_graph_id
         self.dataset_name = dataset_name
@@ -14,12 +14,15 @@ class EditPath:
         self.number_of_flips = 0
         self.first_flip_relative = None
         self.number_of_nodes_start = 0
+        self.number_of_nodes_target = 0
         self.number_of_edges_start = 0
-        self.number_of_nodes_target = 0
-        self.number_of_nodes_target = 0
+        self.number_of_edges_target = 0
         self.ged = 0
         self.start_graph_label = dataset[start_graph_id].y.item()
         self.target_graph_label = dataset[target_graph_id].y.item()
+        self.operations = []
+        self.num_components = []
+        self.num_circles = []
         
     def countFlips(self):
         for i, pr in enumerate(self.prediction):
@@ -53,4 +56,5 @@ class EditPath:
             self.first_flip_relative = (flip_index+1)
         else:
             self.first_flip_relative = None
+
 

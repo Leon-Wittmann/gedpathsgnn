@@ -7,72 +7,44 @@ from torch_geometric.loader import DataLoader
 from models import GCN, GAT, GIN
 from plot import plot_and_save_curves
 import os
+import pandas as pd
+import dataframe_image as dfi
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-"""
-def load_edit_paths(path):
-    paths = []
-
-    with open(path, "r") as f:
-        for line in f:
-            s_id, step, t_id, node_edge, comp, operation = line.strip().split()
-            s_id, step, t_id = int(s_id), int(step), int(t_id)
-            paths.append({"s_id":s_id, "step":step, "t_id":t_id, "node_edge":node_edge, "comp":comp, "operation":operation})
-
-    paths = [step for step in paths if not step["step"] > 1]
-
-    for i, step in enumerate(paths):
-        print(step)
-
-def graph_augmentation(dataset_name):
-
-    dataset = TUDataset(root="data", name=dataset_name)
-    paths = load_edit_paths(f"data/Results/BIPARTITE/{dataset_name}/{dataset_name}_edit_paths_data.txt")
-
-graph_augmentation("DHFR")
-"""
-
-graphs, steps = load_graphs_from_pt("BIPARTITE", "DHFR")
-dataset = TUDataset(root='./data', name="DHFR")
-
-new_graphs = []
-for i, graph in enumerate(graphs):
-    parts = graph["bgf_name"].split("_")
-    dataset_name, start, target, step = parts
-    start = int(start)
-    target = int(target)
-    step = int(step)
-    if(step == 1):
-        new_graph = Data(x = graph.x, edge_index = graph.edge_index, y = torch.tensor([dataset[start].y.item()]))
-        new_graph.x = new_graph.x[:, 1:]
+def set_ids(dataset_name):
+    dataset = TUDataset(root='./data', name=dataset_name)
+    new_graphs = []
+    for i, graph in enumerate(dataset):
+        new_graph = Data(x = graph.x, edge_index = graph.edge_index, y = graph.y, id = i)
         new_graphs.append(new_graph)
         
-old_graphs = [dataset[i] for i in range(len(dataset))]
-print(old_graphs[0])
-print(new_graphs[0])
-all_graphs = old_graphs + new_graphs
-dataset.data, dataset.slices = dataset.collate(all_graphs)
+    dataset.data, dataset.slices = dataset.collate(new_graphs)
+    return dataset
 
-print(len(dataset))
+def training(dataset_name, method, augmentation_method, radius=1, model_class = GIN, original=None, aug_dataset=None, num_aug=0):
+    epoch = 300
+    test_dataset  = original[int(0.8 * len(original)):]
+    if(augmentation_method == "absolute"):
+        train_dataset = original[:int(0.8 * len(original))] + aug_dataset
+    elif(augmentation_method == "relative"):
+        train_dataset = original[:int(0.8 * len(original))] + aug_dataset
+    elif(augmentation_method == "baseline"):
+        train_dataset = original[:int(0.8 * len(original))]
+        
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    test_loader  = DataLoader(test_dataset, batch_size=64)
 
-def training():
-    epoch = 350
-    train_dataset = dataset[:int(0.8 * len(dataset))]
-    test_dataset  = dataset[int(0.8 * len(dataset)):]
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    test_loader  = DataLoader(test_dataset, batch_size=32)
-
-    num_node_features = dataset.num_node_features
-    num_classes = dataset.num_classes
+    num_node_features = original.num_node_features
+    num_classes = original.num_classes
 
     print(num_node_features)
     print(num_classes)
 
-    model = GIN(in_channels=num_node_features, hidden_channels=64, num_classes=num_classes).to(DEVICE)
+    model = model_class(in_channels=num_node_features, hidden_channels=128, num_classes=num_classes).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 
-    train_losses, test_accs = [], []
+    train_losses, test_accs, train_accs = [], [], []
 
     def train(model, loader, optimizer):
         model.train()
@@ -100,7 +72,7 @@ def training():
         print("  Train label counts:", label_counts.tolist())
         print("  Train pred counts:", pred_counts.tolist())
 
-        return total_loss / len(loader)
+        return total_loss / len(loader), (all_preds == all_labels).float().mean().item()
 
     def test(model, loader):
         model.eval()
@@ -127,15 +99,17 @@ def training():
 
 
     for epoch in range(1, epoch + 1):
-        loss = train(model, train_loader, optimizer)
+        loss, train_acc = train(model, train_loader, optimizer)
         acc = test(model, test_loader)
         train_losses.append(loss)
         test_accs.append(acc)
-        print("Epoch: ", epoch, " | Loss: ", loss, " | Accuracy: ", acc)
+        train_accs.append(train_acc)
+        print("Epoch: ", epoch, " | Loss: ", loss, " | Accuracy Test: ", acc, " | Accuracy Training: ", train_acc)
 
-    plot_and_save_curves(train_losses, test_accs, out_dir="plots", prefix=f"{dataset_name}_{model.__class__.__name__}")
+    os.makedirs("plots/augmentation", exist_ok=True)
+    plot_and_save_curves(train_losses, test_accs, out_dir="plots/augmentation", prefix=f"{dataset_name}_{model.__class__.__name__}_{method}_{augmentation_method}_{radius}")
 
-    MODEL_PATH = f"models/augmentation/{dataset_name}_{model.__class__.__name__}.pt"
+    MODEL_PATH = f"models/augmentation/{dataset_name}_{model.__class__.__name__}_{method}_{augmentation_method}_{radius}.pt"
     os.makedirs("models/augmentation", exist_ok=True)
 
     torch.save({
@@ -147,4 +121,112 @@ def training():
 
     print(f"Modell gespeichert unter {MODEL_PATH}")
 
-training()
+    if(augmentation_method == "baseline"):
+        augmentation_method = "Basis Datensatz"
+    elif(augmentation_method == "absolute"):
+        augmentation_method = f"Absolut k={radius}"
+    elif(augmentation_method == "relative"):
+        augmentation_method = f"Relativ k={radius}"
+
+    return{
+        "Datensatz": dataset_name,
+        "Model": model.__class__.__name__,
+        "Methode": augmentation_method,
+        "Trainings Loss": train_losses[-1],
+        "Trainings Accuracy": train_accs[-1],
+        "Test Accuracy": test_accs[-1],
+        "Anzahl neuer Graphen": num_aug
+    }
+
+def graph_augmentation(dataset_name, method, radius, original):
+    test_dataset  = original[int(0.8 * len(original)):]
+    test_dataset_ids = []
+    for i, graph in enumerate(test_dataset):
+        test_dataset_ids.append(graph.id)
+            
+    graphs, steps = load_graphs_from_pt(method=method, dataset=dataset_name)
+    new_graphs = []
+    augmented = []
+    for i, graph in enumerate(graphs):
+        print(i)
+        parts = graph["bgf_name"].split("_")
+        d_name, start, target, step = parts
+        start = int(start)
+        target = int(target)
+        step = int(step)
+        if(step == radius):
+            if((start not in test_dataset_ids) and (start not in augmented)):
+                new_graph = Data(x = graph.x, edge_index = graph.edge_index, y = torch.tensor([original[start].y.item()]), id=-1)
+                new_graph.x = new_graph.x[:, -original.num_node_features:]
+                new_graphs.append(new_graph)
+                augmented.append(start)
+
+    graphs.data, graphs.slices = graphs.collate(new_graphs)
+    print("Datensatz erweitert mit ", len(graphs), " Graphen.")
+    return graphs, len(new_graphs)
+
+def graph_augmentation_relative(dataset_name, method, radius, original):
+    test_dataset  = original[int(0.8 * len(original)):]
+    test_dataset_ids = []
+    for i, graph in enumerate(test_dataset):
+        test_dataset_ids.append(graph.id)
+    graphs, steps = load_graphs_from_pt(method=method, dataset=dataset_name)
+    mappings = pd.read_csv(f"data\Results\Mappings\{method}\{dataset_name}\{dataset_name}_ged_mapping.csv")
+    mappings.columns = (mappings.columns.str.strip().str.lower().str.replace(" ", "_"))
+    x = 0
+    count_aug_graphs = 0
+    new_graphs = []
+    augmented = []
+    for row in mappings.itertuples(index=False):
+        source = row.source_id
+        target_id = row.target_id
+        dist = row.approximated_distance
+        arg_graph_id = int(dist*radius)
+        for i in range(x, len(graphs)):
+            graph = graphs[i]
+            parts = graph["bgf_name"].split("_")
+            d_name, start, target, step = parts
+            start = int(start)
+            target = int(target)
+            step = int(step)
+            if(start == source and target == target_id and step == arg_graph_id):
+                if start not in test_dataset_ids:
+                    if start not in augmented:
+                        count_aug_graphs += 1
+                        augmented.append(start)
+                        new_graph = Data(x = graph.x, edge_index = graph.edge_index, y = torch.tensor([original[start].y.item()]), id=-1)
+                        new_graph.x = new_graph.x[:, -original.num_node_features:]
+                        new_graphs.append(new_graph)
+                        print("Gefunden.", count_aug_graphs, step)
+                x = i
+                break        
+
+    graphs.data, graphs.slices = graphs.collate(new_graphs)             
+    return graphs, len(new_graphs)         
+
+def run_test():
+    datasets = ["Mutagenicity", "DHFR", "NCI1", "NCI109", "IMDB-BINARY", "IMDB-MULTI"]
+    method = "BIPARTITE"
+    models = [GIN]#, GCN, GAT]
+    for dataset_name in datasets:
+        results = []
+        original = set_ids(dataset_name=dataset_name).shuffle()
+        dataset_5, len5 = graph_augmentation(dataset_name=dataset_name, method=method, radius=5, original=original)
+        dataset_10, len10 = graph_augmentation(dataset_name=dataset_name, method=method, radius=10, original=original)
+        dataset0_2, len0_2 = graph_augmentation_relative(dataset_name=dataset_name, method=method, radius=0.2, original=original)
+        dataset0_4, len0_4 = graph_augmentation_relative(dataset_name=dataset_name, method=method, radius=0.4, original=original)
+
+        for model_class in models:
+            print("Teilweise fertig.")
+            results.append(training(dataset_name=dataset_name, method="BIPARTITE", augmentation_method="baseline", model_class=model_class, original=original))
+            results.append(training(dataset_name=dataset_name, method="BIPARTITE", augmentation_method="absolute", radius=5, model_class=model_class, original=original, aug_dataset=dataset_5, num_aug=len5))
+            results.append(training(dataset_name=dataset_name, method="BIPARTITE", augmentation_method="absolute", radius=10, model_class=model_class, original=original, aug_dataset=dataset_10, num_aug=len10))
+            results.append(training(dataset_name=dataset_name, method="BIPARTITE", augmentation_method="relative", radius=0.2, model_class=model_class, original=original, aug_dataset=dataset0_2, num_aug=len0_2))
+            results.append(training(dataset_name=dataset_name, method="BIPARTITE", augmentation_method="relative", radius=0.4, model_class=model_class, original=original, aug_dataset=dataset0_4, num_aug=len0_4))
+
+        df = pd.DataFrame(results)
+        df = df.round(4)
+        os.makedirs("plots/augmentation", exist_ok=True)
+        dfi.export(df, f"plots/augmentation/gnn_augmentation_results_{dataset_name}.png")
+
+run_test()

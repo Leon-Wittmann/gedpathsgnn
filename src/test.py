@@ -16,6 +16,9 @@ import dataframe_image as dfi
 import csv
 import numpy as np
 import networkx as nx
+from torch_geometric.utils import to_scipy_sparse_matrix
+from scipy.sparse.csgraph import connected_components
+from utils import get_num_components, get_num_k_circles
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -118,41 +121,7 @@ def run_training(dataset_name, model_class=GIN, hidden_dim=64, batch_size=32, ep
         "test_acc": test_accs[-1]
     }
 
-
-def load_trained_model(model_class, model_path, device=None):
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    checkpoint = torch.load(model_path, map_location=device)
-
-    model = model_class(
-        checkpoint["num_node_features"],
-        checkpoint["hidden_dim"],
-        checkpoint["num_classes"]
-    ).to(device)
-
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.eval()
-
-    return model, checkpoint
-
-def analyze_results(dataset_name, model_class, method, result_list):
-    flip_counts = []
-
-    groups = defaultdict(list)
-    groups_start_target_label = defaultdict(list) 
-
-    for i, ep in enumerate(result_list):    
-        ep.countFlips()
-        ep.analyzeStartTargetGraphs()
-        ep.readGED()
-        ep.doFirstFlip()
-        flip_counts.append(ep.number_of_flips)
-        groups[ep.number_of_flips].append(ep)
-        groups_start_target_label[(ep.start_graph_label, ep.target_graph_label)].append(ep.first_flip_relative)
-
-    #First Flip statistik
-
+def average_first_flip(dataset_name, model_class, method, groups_start_target_label):
     table = defaultdict(dict)
 
     for(start_label, target_label), values in groups_start_target_label.items():
@@ -180,7 +149,7 @@ def analyze_results(dataset_name, model_class, method, result_list):
 
     plt.xlabel("Target Graph Label")
     plt.ylabel("Start Graph Label")
-    plt.title("Average First Flip per (Start, Target) Label")
+    plt.title("Durchschnittliche Anzahl an Schritten bis zum ersten Flip")
 
     for i in range(df.shape[0]):
         for j in range(df.shape[1]):
@@ -197,8 +166,7 @@ def analyze_results(dataset_name, model_class, method, result_list):
     plt.savefig(f"{output_dir}/{dataset_name}_{model_class.__name__}_{method}.png", dpi=300)
     plt.close()
 
-    #Flip statistic speichern
-    
+def create_flip_statistic(dataset_name, model_class, method, groups, flip_counts):
     rows = []
 
     for flips, eps in sorted(groups.items()):
@@ -265,7 +233,209 @@ def analyze_results(dataset_name, model_class, method, result_list):
     plt.savefig(save_path)
     plt.close()
 
-    print(f"Histogram saved to {save_path}")
+def load_trained_model(model_class, model_path, device=None):
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    checkpoint = torch.load(model_path, map_location=device)
+
+    model = model_class(
+        checkpoint["num_node_features"],
+        checkpoint["hidden_dim"],
+        checkpoint["num_classes"]
+    ).to(device)
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+
+    return model, checkpoint
+
+def create_heatmap(dataset_name, model_class, method, result_list):
+    longest_path = max(len(ep.operations) for ep in result_list)
+    most_flips = max(ep.number_of_flips for ep in result_list)
+    print(longest_path)
+    print(most_flips)
+    heatmap0 = np.zeros((most_flips, longest_path))
+    heatmap1 = np.zeros((most_flips, longest_path))
+    for i, ep in enumerate(result_list):
+        if(ep.start_graph_label == 0):
+            num_flips = 0
+            for j, pred in enumerate(ep.prediction):
+                if(j != 0):
+                    if(ep.prediction[j-1] != pred):
+                        heatmap0[num_flips, j-1] += 1
+                        num_flips += 1
+        elif(ep.start_graph_label == 1):
+            num_flips = 0
+            for j, pred in enumerate(ep.prediction):
+                if(j != 0):
+                    if(ep.prediction[j-1] != pred):
+                        heatmap1[num_flips, j-1] += 1
+                        num_flips += 1
+        else:
+            print("Fehler Heatmap")
+
+    vmin = min(heatmap0.min(), heatmap1.min())
+    vmax = max(heatmap0.max(), heatmap1.max())
+
+    fig, axs = plt.subplots(nrows=2, ncols=1, figsize=(10, 6), constrained_layout=True)
+
+    im0 = axs[0].imshow(heatmap0, cmap="viridis", interpolation="nearest", vmin=vmin, vmax=vmax)
+    axs[0].set_title("Heatmap Class 0")
+    axs[0].set_xlabel("Step")
+    axs[0].set_ylabel("Flip")
+
+    im1 = axs[1].imshow(heatmap1, cmap="viridis", interpolation="nearest", vmin=vmin, vmax=vmax)
+    axs[1].set_title("Heatmap Class 1")
+    axs[1].set_xlabel("Step")
+    axs[1].set_ylabel("Flip")
+
+    cbar = fig.colorbar(im0, ax=axs, orientation="horizontal", fraction=0.05, pad=0.08)
+    cbar.set_label("Anzahl Flips")
+
+    os.makedirs("plots/heatmaps", exist_ok=True)
+    plt.savefig(f"plots/heatmaps/heatmaps_class_0_1_{dataset_name}_{model_class.__name__}_{method}.png", dpi=300)
+    plt.close()
+
+def analyze_operations(dataset_name, model_class, method, result_list):
+    OPS = ["NODE_INSERT", "NODE_DELETE", "NODE_RELABEL",
+        "EDGE_INSERT", "EDGE_DELETE", "EDGE_RELABEL"]
+
+    flip_counts = Counter({op: 0 for op in OPS})
+    operation_counts = Counter({op: 0 for op in OPS})
+    components_increase_counts = 0
+    components_decrease_counts = 0
+    components_increase_counts_total = 0
+    components_decrease_counts_total = 0
+    circles_created_counts = 0
+    circles_deleated_counts = 0
+    circles_created_counts_total = 0
+    circles_deleated_counts_total = 0
+
+    for path in result_list:
+        pred = path.prediction
+        ops = path.operations
+        comps = path.num_components
+        circs = path.num_circles
+
+
+        for i, op in enumerate(ops, start=1):
+            if pred[i-1] != pred[i]:
+                flip_counts[op] += 1
+                if(comps[i-1] > comps[i] and op == "EDGE_INSERT"):
+                    components_decrease_counts += 1
+                    components_decrease_counts_total += 1
+                if(circs[i-1] > circs[i] and op == "EDGE_DELETE"):
+                    circles_deleated_counts += 1
+                    circles_deleated_counts_total += 1
+                if(comps[i-1] < comps[i] and op == "EDGE_DELETE"):
+                    components_increase_counts += 1
+                    components_increase_counts_total += 1
+                if(circs[i-1] > circs[i] and op == "EDGE_INSERT"):
+                    circles_created_counts += 1
+                    circles_created_counts_total += 1
+            else:
+                if(comps[i-1] > comps[i] and op == "EDGE_INSERT"):
+                    components_decrease_counts_total += 1
+                if(circs[i-1] > circs[i] and op == "EDGE_DELETE"):
+                    circles_deleated_counts_total += 1
+                if(comps[i-1] < comps[i] and op == "EDGE_DELETE"):
+                    components_increase_counts_total += 1
+                if(circs[i-1] > circs[i] and op == "EDGE_INSERT"):
+                    circles_created_counts_total += 1
+
+        for op in ops:
+            operation_counts[op] += 1
+
+
+
+    flip_rel = {op: flip_counts[op] / operation_counts[op] if operation_counts[op] > 0 else 0 for op in OPS}
+
+
+    edge_insert_total = operation_counts["EDGE_INSERT"] if operation_counts["EDGE_INSERT"] > 0 else 1
+    edge_delete_total = operation_counts["EDGE_DELETE"] if operation_counts["EDGE_DELETE"] > 0 else 1
+
+    edge_insert_rel = {
+        "components_decrease": components_decrease_counts / edge_insert_total,
+        "circles_created": circles_created_counts / edge_insert_total
+    }
+    edge_delete_rel = {
+        "components_increase": components_increase_counts / edge_delete_total,
+        "circles_deleated": circles_deleated_counts / edge_delete_total
+    }
+
+    edge_insert_rel_total = {
+        "components_decrease": components_decrease_counts_total / edge_insert_total,
+        "circles_created": circles_created_counts_total / edge_insert_total
+    }
+    edge_delete_rel_total = {
+        "components_increase": components_increase_counts_total / edge_delete_total,
+        "circles_deleated": circles_deleated_counts_total / edge_delete_total
+    }
+
+
+    rest_edge_insert = flip_rel["EDGE_INSERT"] - sum(edge_insert_rel.values())
+    rest_edge_delete = flip_rel["EDGE_DELETE"] - sum(edge_delete_rel.values())
+    rest_edge_insert_total = (1-edge_insert_rel_total["components_decrease"] - edge_insert_rel_total["circles_created"])
+    rest_edge_delete_total = (1-edge_delete_rel_total["components_increase"] - edge_delete_rel_total["circles_deleated"])
+
+    fig, ax = plt.subplots(figsize=(14,6))
+
+
+    for op in ["NODE_INSERT", "NODE_DELETE", "NODE_RELABEL", "EDGE_INSERT", "EDGE_DELETE", "EDGE_RELABEL", "EDGE_INSERT_TOTAL", "EDGE_DELETE_TOTAL"]:
+        if op == "EDGE_INSERT":
+            ax.bar(op, rest_edge_insert, color='blue', alpha=0.7, label="Flip Rate (rest)")
+            ax.bar(op, edge_insert_rel["components_decrease"], bottom=rest_edge_insert, color='orange', label="Disconnected Parts Changed")
+            ax.bar(op, edge_insert_rel["circles_created"], bottom=rest_edge_insert + edge_insert_rel["components_decrease"], color='green', label="Number of Circles changes (length=6)")
+        elif op == "EDGE_DELETE":
+            ax.bar(op, rest_edge_delete, color='blue', alpha=0.7)
+            ax.bar(op, edge_delete_rel["components_increase"], bottom=rest_edge_delete, color='orange')
+            ax.bar(op, edge_delete_rel["circles_deleated"], bottom=rest_edge_delete + edge_delete_rel["components_increase"], color='green')
+        elif op == "EDGE_INSERT_TOTAL":
+            ax.bar(op, rest_edge_insert_total, color='blue', alpha=0.7, label="Flip Rate (rest)")
+            ax.bar(op, edge_insert_rel_total["components_decrease"], bottom=rest_edge_insert_total, color='orange', label="Disconnected Parts Changed")
+            ax.bar(op, edge_insert_rel_total["circles_created"], bottom=rest_edge_insert_total + edge_insert_rel_total["components_decrease"], color='green')
+        elif op == "EDGE_DELETE_TOTAL":
+            ax.bar(op, rest_edge_delete_total, color='blue', alpha=0.7)
+            ax.bar(op, edge_delete_rel_total["components_increase"], bottom=rest_edge_delete_total, color='orange')
+            ax.bar(op, edge_delete_rel_total["circles_deleated"], bottom=rest_edge_delete_total + edge_delete_rel_total["components_increase"], color='green')
+        else:
+            ax.bar(op, flip_rel[op], color='blue', alpha=0.7)
+
+
+    handles, labels = ax.get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    ax.legend(by_label.values(), by_label.keys())
+
+    ax.set_ylabel("Relative Häufigkeit")
+    ax.set_title("Flip-Statistik und Graph-Eigenschaftsänderungen pro Operation")
+
+    plt.tight_layout()
+    save_dir = "plots/operation_stats"
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, f"{dataset_name}_{model_class.__name__}_{method}.png")
+    plt.savefig(save_path)
+    plt.close()
+
+def analyze_results(dataset_name, model_class, method, result_list):
+    flip_counts = []
+
+    groups = defaultdict(list)
+    groups_start_target_label = defaultdict(list) 
+
+    for i, ep in enumerate(result_list):    
+        ep.countFlips()
+        ep.analyzeStartTargetGraphs()
+        ep.readGED()
+        ep.doFirstFlip()
+        flip_counts.append(ep.number_of_flips)
+        groups[ep.number_of_flips].append(ep)
+        groups_start_target_label[(ep.start_graph_label, ep.target_graph_label)].append(ep.first_flip_relative)
+
+    average_first_flip(dataset_name=dataset_name, model_class=model_class, method=method, groups_start_target_label=groups_start_target_label)
+    create_flip_statistic(dataset_name=dataset_name, model_class=model_class, method=method, groups=groups, flip_counts=flip_counts)
+    analyze_operations(dataset_name=dataset_name, model_class=model_class, method=method, result_list=result_list)
+    create_heatmap(dataset_name=dataset_name, model_class=model_class, method=method, result_list=result_list)
 
 def run_experiment(dataset_name, model_class, method):
 
@@ -277,14 +447,11 @@ def run_experiment(dataset_name, model_class, method):
     count_zeros = 0
     path_id = 0
     result_list = []
-    result_list.append(EditPath(start_graph_id=steps[0]['start_graph'], target_graph_id=steps[0]['target_graph'], dataset_name=dataset_name, method=method, dataset=dataset))
+    result_list.append(EditPath(start_graph_id=graphs[0].edit_path_start.item(), target_graph_id=graphs[0].edit_path_end.item(), dataset_name=dataset_name, method=method, dataset=dataset))
     new_path = True
-    flip_operation = []
-    previous_pred_class = None
 
-    for i, st in enumerate(steps):  
+    for i, graph in enumerate(graphs):  
 
-        graph = graphs[i + path_id + 1] #bgf beinhaltet target graph, .txt anweisungen nicht
         graph = graph.to(DEVICE)
 
         if isinstance(model, GIN):
@@ -294,11 +461,11 @@ def run_experiment(dataset_name, model_class, method):
         graph_features = graph.x[:, -num_features_model:].float()
         batch = torch.zeros(graph.num_nodes, dtype=torch.long, device=DEVICE)
 
-        new_path = False
-        if(steps[i]['start_graph'] != result_list[path_id].start_graph_id or steps[i]['target_graph'] != result_list[path_id].target_graph_id ):
+        if(i>0): new_path = False
+        if(graph.edit_path_start.item() != result_list[path_id].start_graph_id or graph.edit_path_end.item() != result_list[path_id].target_graph_id):
             print("Beginn eines neuen Pfades!")
             path_id += 1
-            result_list.append(EditPath(start_graph_id=steps[i]['start_graph'], target_graph_id=steps[i]['target_graph'], dataset_name=dataset_name, method=method, dataset=dataset))
+            result_list.append(EditPath(start_graph_id=graph.edit_path_start.item(), target_graph_id=graph.edit_path_end.item(), dataset_name=dataset_name, method=method, dataset=dataset))
             new_path = True
 
 
@@ -307,50 +474,21 @@ def run_experiment(dataset_name, model_class, method):
             
         
         pred_class = out.argmax(dim=1).item()
+        step = steps[i - path_id - 1]
 
-        if(new_path == False and previous_pred_class != None):
-            if(pred_class != previous_pred_class):
-                flip_operation.append((steps[i]['level'] ,steps[i]['operation_type']))
-
-        previous_pred_class = pred_class
         result_list[path_id].prediction.append(pred_class)
-        print(steps[i], pred_class)
+        result_list[path_id].num_components.append(get_num_components(graph))
+        result_list[path_id].num_circles.append(get_num_k_circles(graph, 6))
+    
+        if(new_path != True): 
+            result_list[path_id].operations.append(f"{step['level']}_{step['operation_type']}")
 
         if pred_class == 1:
             count_ones += 1
         else:
             count_zeros += 1
-    
-    OPERATION_ORDER = [
-        ("NODE", "INSERT"),
-        ("NODE", "DELETE"),
-        ("NODE", "RELABEL"),
-        ("EDGE", "INSERT"),
-        ("EDGE", "DELETE"),
-        ("EDGE", "RELABEL"),
-    ]
 
-    counter = Counter(flip_operation)
-
-    labels = []
-    counts = []
-
-    for op in OPERATION_ORDER:
-        labels.append(f"{op[0]}_{op[1]}")
-        counts.append(counter.get(op, 0))
-
-    plt.figure(figsize=(10, 5))
-    plt.bar(labels, counts)
-    plt.xticks(rotation=45, ha="right")
-    plt.ylabel("Anzahl")
-    plt.xlabel("Flip Operation")
-    plt.title("Kritische Operationen")
-
-    output_dir = "plots/operations"
-    os.makedirs(output_dir, exist_ok=True)
-
-    plt.tight_layout()
-    plt.savefig(f"{output_dir}/{dataset_name}_{model_class.__name__}_{method}.png", dpi=300)
+        print(i, "/", len(graphs))
 
     analyze_results(dataset_name=dataset_name, model_class=model_class, method=method, result_list=result_list)
 
@@ -374,66 +512,62 @@ def save_dataframe_as_image(df, filename="gnn_results.png", dpi=300):
     plt.close()
 
 def test(dataset_name, method):
-    dataset = TUDataset(root="./data", name=dataset_name)
-    ep = EditPath(start_graph_id=0, target_graph_id=10, dataset_name=dataset_name, method=method, dataset=dataset)
-    print(dataset[0].y.item())
+    dataset, steps = load_graphs_from_pt(method=method, dataset=dataset_name)
+    for i in range(10):
+        data = dataset[i]
+        adj = to_scipy_sparse_matrix(
+            data.edge_index,
+            num_nodes=data.num_nodes
+        )
+        n_components, labels = connected_components(adj, directed=False)
+        dataset[i].num_components = int(n_components)
+        print(dataset[i])
+        print(dataset[i].edit_path_start.item(), dataset[i].edit_path_end.item(), dataset[i].edit_path_step.item())
 
-#test(dataset_name="DHFR", method="BIPARTITE")    
+def run_full_experiment():
+    datasets = ["Mutagenicity", "DHFR", "NCI1", "NCI109", "IMDB-BINARY", "IMDB-MULTI"]
+    models = [GIN, GCN, GAT]
 
-run_experiment(dataset_name="Mutagenicity", model_class=GIN, method="BIPARTITE")
-run_experiment(dataset_name="Mutagenicity", model_class=GCN, method="BIPARTITE")
-run_experiment(dataset_name="Mutagenicity", model_class=GAT, method="BIPARTITE")
+    for dataset_name in datasets:
+        for model_class in models:
+            run_experiment(dataset_name=dataset_name, model_class=model_class, method="BIPARTITE")
 
-run_experiment(dataset_name="DHFR", model_class=GIN, method="BIPARTITE")
-run_experiment(dataset_name="DHFR", model_class=GCN, method="BIPARTITE")
-run_experiment(dataset_name="DHFR", model_class=GAT, method="BIPARTITE")
+def run_full_training():
+    datasets = ["Mutagenicity", "DHFR", "NCI1", "NCI109", "IMDB-BINARY", "IMDB-MULTI"]
+    models = [GIN, GCN, GAT]
 
-run_experiment(dataset_name="NCI1", model_class=GIN, method="BIPARTITE")
-run_experiment(dataset_name="NCI1", model_class=GCN, method="BIPARTITE")
-run_experiment(dataset_name="NCI1", model_class=GAT, method="BIPARTITE")
+    results = []
 
-run_experiment(dataset_name="NCI109", model_class=GIN, method="BIPARTITE")
-run_experiment(dataset_name="NCI109", model_class=GCN, method="BIPARTITE")
-run_experiment(dataset_name="NCI109", model_class=GAT, method="BIPARTITE")
+    for dataset_name in datasets:
+        for model_class in models:
+            print(f"\n=== Training {model_class.__name__} on {dataset_name} ===")
+            if(dataset_name == "IMDB-MULTI" or dataset_name == "IMDB-BINARY"):
+                result = run_training(
+                    dataset_name=dataset_name,
+                    model_class=model_class,
+                    hidden_dim=128,
+                    batch_size=32,
+                    epoch=300,
+                    lr=0.001
+                )
+            else:
+                result = run_training(
+                    dataset_name=dataset_name,
+                    model_class=model_class,
+                    hidden_dim=128,
+                    batch_size=32,
+                    epoch=300,
+                    lr=0.001
+                )
+            results.append(result)
 
-#run_training(dataset_name="IMDB-MULTI", model_class=GIN)
-"""
-datasets = ["Mutagenicity", "DHFR", "NCI1", "NCI109", "IMDB-BINARY", "IMDB-MULTI"]
-models = [GIN, GCN, GAT]
+    df = pd.DataFrame(results)
+    df.to_csv("gnn_training_results.csv", index=False)
+    df_pretty = df.copy()
+    df_pretty["train_loss"] = df_pretty["train_loss"].round(4)
+    df_pretty["test_acc"] = (df_pretty["test_acc"] ).round(4)
+    df_no_index = df_pretty.reset_index(drop=True)
+    dfi.export(df_pretty, "gnn_training_results.png")
 
-#datasets = ["DHFR"]
-#models = [GIN]
+run_full_experiment()
 
-results = []
-
-for dataset_name in datasets:
-    for model_class in models:
-        print(f"\n=== Training {model_class.__name__} on {dataset_name} ===")
-        if(dataset_name == "IMDB-MULTI" or dataset_name == "IMDB-BINARY"):
-            result = run_training(
-                dataset_name=dataset_name,
-                model_class=model_class,
-                hidden_dim=32,
-                batch_size=32,
-                epoch=300,
-                lr=0.001
-            )
-        else:
-            result = run_training(
-                dataset_name=dataset_name,
-                model_class=model_class,
-                hidden_dim=64,
-                batch_size=32,
-                epoch=300,
-                lr=0.001
-            )
-        results.append(result)
-
-df = pd.DataFrame(results)
-df.to_csv("gnn_training_results.csv", index=False)
-df_pretty = df.copy()
-df_pretty["train_loss"] = df_pretty["train_loss"].round(4)
-df_pretty["test_acc"] = (df_pretty["test_acc"] ).round(4)
-df_no_index = df_pretty.reset_index(drop=True)
-dfi.export(df_pretty, "gnn_training_results.png")
-"""

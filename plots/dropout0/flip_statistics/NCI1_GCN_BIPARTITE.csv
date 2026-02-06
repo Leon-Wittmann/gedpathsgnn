@@ -1,0 +1,5 @@
+number_of_flips,count,nodes_start_mean,edges_start_mean,nodes_target_mean,edges_target_mean,Average GED
+0,4989,27.97,30.25,31.96,34.58,75
+1,5,19.2,19.8,23.8,25.4,68
+2,2,16.5,17.5,21.5,23.0,52
+3,4,27.75,29.0,12.75,13.0,61
