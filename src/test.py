@@ -19,6 +19,7 @@ import networkx as nx
 from torch_geometric.utils import to_scipy_sparse_matrix
 from scipy.sparse.csgraph import connected_components
 from utils import get_num_components, get_num_k_circles
+from matplotlib.colors import PowerNorm
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -99,7 +100,7 @@ def run_training(dataset_name, model_class=GIN, hidden_dim=64, batch_size=32, ep
         train_losses.append(loss)
         test_accs.append(acc)
         print("Epoch: ", epoch, " | Loss: ", loss, " | Accuracy: ", acc)
-
+    
     plot_and_save_curves(train_losses, test_accs, out_dir="plots", prefix=f"{dataset_name}_{model.__class__.__name__}")
 
     MODEL_PATH = f"models/{dataset_name}_{model.__class__.__name__}.pt"
@@ -120,7 +121,7 @@ def run_training(dataset_name, model_class=GIN, hidden_dim=64, batch_size=32, ep
         "train_loss": train_losses[-1],
         "test_acc": test_accs[-1]
     }
-
+    
 def average_first_flip(dataset_name, model_class, method, groups_start_target_label):
     table = defaultdict(dict)
 
@@ -172,27 +173,38 @@ def create_flip_statistic(dataset_name, model_class, method, groups, flip_counts
     for flips, eps in sorted(groups.items()):
         n = len(eps)
 
+        def mean_std(values):
+            mean = np.mean(values)
+            if len(values) > 1:
+                std = np.std(values, ddof=1)
+            else:
+                std = 0
+            return f"{mean:.2f} ± {std:.2f}"
+
+
         row = {
             "number_of_flips": flips,
             "count": n,
-            "nodes_start_mean": round(
-                sum(ep.number_of_nodes_start for ep in eps) / n, 2
-            ),
-            "edges_start_mean": round(
-                sum(ep.number_of_edges_start for ep in eps) / n, 2
-            ),
-            "nodes_target_mean": round(
-                sum(ep.number_of_nodes_target for ep in eps) / n, 2
-            ),
-            "edges_target_mean": round(
-                sum(ep.number_of_edges_target for ep in eps) / n, 2
-            ),
-            "Average GED": round(
-                sum(ep.ged for ep in eps) / n
-            ),
+            "nodes_start": mean_std([ep.number_of_nodes_start for ep in eps]),
+            "edges_start": mean_std([ep.number_of_edges_start for ep in eps]),
+            "nodes_target": mean_std([ep.number_of_nodes_target for ep in eps]),
+            "edges_target": mean_std([ep.number_of_edges_target for ep in eps]),
+            "Average GED": mean_std([ep.ged for ep in eps]),
         }
 
         rows.append(row)
+
+    all_eps = [ep for eps_list in groups.values() for ep in eps_list]
+    row_all = {
+        "number_of_flips": "Total",
+        "count": len(all_eps),
+        "nodes_start": mean_std([ep.number_of_nodes_start for ep in all_eps]),
+        "edges_start": mean_std([ep.number_of_edges_start for ep in all_eps]),
+        "nodes_target": mean_std([ep.number_of_nodes_target for ep in all_eps]),
+        "edges_target": mean_std([ep.number_of_edges_target for ep in all_eps]),
+        "Average GED": mean_std([ep.ged for ep in all_eps]),
+    }
+    rows.append(row_all)
 
     df = pd.DataFrame(rows)
 
@@ -243,7 +255,7 @@ def load_trained_model(model_class, model_path, device=None):
         checkpoint["num_node_features"],
         checkpoint["hidden_dim"],
         checkpoint["num_classes"]
-    ).to(device)
+    ).to(DEVICE)
 
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
@@ -257,6 +269,7 @@ def create_heatmap(dataset_name, model_class, method, result_list):
     print(most_flips)
     heatmap0 = np.zeros((most_flips, longest_path))
     heatmap1 = np.zeros((most_flips, longest_path))
+    heatmap2 = np.zeros((most_flips, longest_path))
     for i, ep in enumerate(result_list):
         if(ep.start_graph_label == 0):
             num_flips = 0
@@ -272,29 +285,58 @@ def create_heatmap(dataset_name, model_class, method, result_list):
                     if(ep.prediction[j-1] != pred):
                         heatmap1[num_flips, j-1] += 1
                         num_flips += 1
+        elif(ep.start_graph_label == 2):
+            num_flips = 0
+            for j, pred in enumerate(ep.prediction):
+                if(j != 0):
+                    if(ep.prediction[j-1] != pred):
+                        heatmap2[num_flips, j-1] += 1
+                        num_flips += 1
         else:
             print("Fehler Heatmap")
 
-    vmin = min(heatmap0.min(), heatmap1.min())
-    vmax = max(heatmap0.max(), heatmap1.max())
+    heatmap0_plot = heatmap0[:20, :50]
+    heatmap1_plot = heatmap1[:20, :50]
+    heatmap2_plot = heatmap2[:20, :50]
 
-    fig, axs = plt.subplots(nrows=2, ncols=1, figsize=(10, 6), constrained_layout=True)
+    vmin = min(heatmap0_plot.min(), heatmap1_plot.min(), heatmap2_plot.min())
+    vmax = max(heatmap0_plot.max(), heatmap1_plot.max(), heatmap2_plot.max())
 
-    im0 = axs[0].imshow(heatmap0, cmap="viridis", interpolation="nearest", vmin=vmin, vmax=vmax)
-    axs[0].set_title("Heatmap Class 0")
-    axs[0].set_xlabel("Step")
-    axs[0].set_ylabel("Flip")
+    if np.all(heatmap2_plot == 0):
+        fig, axs = plt.subplots(nrows=2, ncols=1, figsize=(5, 8), constrained_layout=True)
 
-    im1 = axs[1].imshow(heatmap1, cmap="viridis", interpolation="nearest", vmin=vmin, vmax=vmax)
-    axs[1].set_title("Heatmap Class 1")
-    axs[1].set_xlabel("Step")
-    axs[1].set_ylabel("Flip")
+        im0 = axs[0].imshow(heatmap0_plot, cmap="Blues", interpolation="nearest", vmin=vmin, vmax=vmax)
+        axs[0].set_title("Heatmap Class 0")           
+        axs[0].set_xlabel("Step")
+        axs[0].set_ylabel("Flip")
+        
+        im1 = axs[1].imshow(heatmap1_plot, cmap="Blues", interpolation="nearest", vmin=vmin, vmax=vmax)
+        axs[1].set_title("Heatmap Class 1")
+        axs[1].set_xlabel("Step")
+        axs[1].set_ylabel("Flip")
+    else:
+        fig, axs = plt.subplots(nrows=3, ncols=1, figsize=(5, 12), constrained_layout=True)
+
+        im0 = axs[0].imshow(heatmap0_plot, cmap="Blues", interpolation="nearest", vmin=vmin, vmax=vmax)
+        axs[0].set_title("Heatmap Class 0")           
+        axs[0].set_xlabel("Step")
+        axs[0].set_ylabel("Flip")
+        
+        im1 = axs[1].imshow(heatmap1_plot, cmap="Blues", interpolation="nearest", vmin=vmin, vmax=vmax)
+        axs[1].set_title("Heatmap Class 1")
+        axs[1].set_xlabel("Step")
+        axs[1].set_ylabel("Flip")
+
+        im2 = axs[2].imshow(heatmap2_plot, cmap="Blues", interpolation="nearest", vmin=vmin, vmax=vmax)
+        axs[2].set_title("Heatmap Class 2")
+        axs[2].set_xlabel("Step")
+        axs[2].set_ylabel("Flip")
 
     cbar = fig.colorbar(im0, ax=axs, orientation="horizontal", fraction=0.05, pad=0.08)
     cbar.set_label("Anzahl Flips")
 
     os.makedirs("plots/heatmaps", exist_ok=True)
-    plt.savefig(f"plots/heatmaps/heatmaps_class_0_1_{dataset_name}_{model_class.__name__}_{method}.png", dpi=300)
+    plt.savefig(f"plots/heatmaps/heatmaps_class_0_1_{dataset_name}_{model_class.__name__}_{method}.png", dpi=300, bbox_inches='tight')
     plt.close()
 
 def analyze_operations(dataset_name, model_class, method, result_list):
@@ -446,49 +488,86 @@ def run_experiment(dataset_name, model_class, method):
     count_ones = 0
     count_zeros = 0
     path_id = 0
+    global_id = 0
     result_list = []
     result_list.append(EditPath(start_graph_id=graphs[0].edit_path_start.item(), target_graph_id=graphs[0].edit_path_end.item(), dataset_name=dataset_name, method=method, dataset=dataset))
     new_path = True
+    loader = DataLoader(graphs, batch_size=128, shuffle=False)
 
-    for i, graph in enumerate(graphs):  
-
-        graph = graph.to(DEVICE)
+    for batch_data in loader:
+        batch_data = batch_data.to(DEVICE)
 
         if isinstance(model, GIN):
             num_features_model = model.conv1.nn[0].in_features
         else:
             num_features_model = model.conv1.in_channels
-        graph_features = graph.x[:, -num_features_model:].float()
-        batch = torch.zeros(graph.num_nodes, dtype=torch.long, device=DEVICE)
-
-        if(i>0): new_path = False
-        if(graph.edit_path_start.item() != result_list[path_id].start_graph_id or graph.edit_path_end.item() != result_list[path_id].target_graph_id):
-            print("Beginn eines neuen Pfades!")
-            path_id += 1
-            result_list.append(EditPath(start_graph_id=graph.edit_path_start.item(), target_graph_id=graph.edit_path_end.item(), dataset_name=dataset_name, method=method, dataset=dataset))
-            new_path = True
-
+        graph_features = batch_data.x[:, -num_features_model:].float()
 
         with torch.no_grad():
-            out = model(graph_features, graph.edge_index.to(DEVICE), batch)
+            out = model(graph_features, batch_data.edge_index, batch_data.batch)
+
+        preds = out.argmax(dim=1).cpu().tolist()
+
+        for pred_class in preds:
+            graph = graphs[global_id]
+
+            if global_id > 0:
+                new_path = False
+
+            if(graph.edit_path_start.item() != result_list[path_id].start_graph_id or graph.edit_path_end.item() != result_list[path_id].target_graph_id):
+                print("Beginn eines neuen Pfades!")
+                path_id += 1
+                result_list.append(EditPath(start_graph_id=graph.edit_path_start.item(), target_graph_id=graph.edit_path_end.item(), dataset_name=dataset_name, method=method, dataset=dataset))
+                new_path = True
+
+            step = steps[global_id - path_id - 1]
             
+            result_list[path_id].prediction.append(pred_class)
+            result_list[path_id].num_components.append(get_num_components(graph))
+            result_list[path_id].num_circles.append(get_num_k_circles(graph, 6))
         
-        pred_class = out.argmax(dim=1).item()
-        step = steps[i - path_id - 1]
+            if(new_path != True): 
+                result_list[path_id].operations.append(f"{step['level']}_{step['operation_type']}")
 
-        result_list[path_id].prediction.append(pred_class)
-        result_list[path_id].num_components.append(get_num_components(graph))
-        result_list[path_id].num_circles.append(get_num_k_circles(graph, 6))
-    
-        if(new_path != True): 
-            result_list[path_id].operations.append(f"{step['level']}_{step['operation_type']}")
+            if pred_class == 1:
+                count_ones += 1
+            else:
+                count_zeros += 1
 
-        if pred_class == 1:
-            count_ones += 1
-        else:
-            count_zeros += 1
+            global_id += 1
 
-        print(i, "/", len(graphs))
+        print(global_id, "/", len(graphs))
+
+    count_correct_00 = 0
+    count_correct_00_total = 0
+    count_correct_11 = 0
+    count_correct_11_total = 0
+    count_correct_01 = 0
+    count_correct_01_total = 0
+    count_correct_10 = 0
+    count_correct_10_total = 0
+    for result in result_list:
+        if(result.start_graph_label == 0 and result.target_graph_label == 0):
+            count_correct_00_total += 1
+            if(result.prediction[0] == result.start_graph_label and result.prediction[-1] == result.target_graph_label):
+                count_correct_00 += 1
+        elif(result.start_graph_label == 0 and result.target_graph_label == 1):
+            count_correct_01_total += 1
+            if(result.prediction[0] == result.start_graph_label and result.prediction[-1] == result.target_graph_label):
+                count_correct_01 += 1
+        elif(result.start_graph_label == 1 and result.target_graph_label == 0):
+            count_correct_10_total += 1
+            if(result.prediction[0] == result.start_graph_label and result.prediction[-1] == result.target_graph_label):
+                count_correct_10 += 1
+        elif(result.start_graph_label == 1 and result.target_graph_label == 1):
+            count_correct_11_total += 1
+            if(result.prediction[0] == result.start_graph_label and result.prediction[-1] == result.target_graph_label):
+                count_correct_11 += 1
+
+    print(count_correct_00, count_correct_00_total)
+    print(count_correct_11, count_correct_11_total)
+    print(count_correct_01, count_correct_01_total)
+    print(count_correct_10, count_correct_10_total)
 
     analyze_results(dataset_name=dataset_name, model_class=model_class, method=method, result_list=result_list)
 
@@ -525,15 +604,15 @@ def test(dataset_name, method):
         print(dataset[i].edit_path_start.item(), dataset[i].edit_path_end.item(), dataset[i].edit_path_step.item())
 
 def run_full_experiment():
-    datasets = ["Mutagenicity", "DHFR", "NCI1", "NCI109", "IMDB-BINARY", "IMDB-MULTI"]
-    models = [GIN, GCN, GAT]
+    datasets = ["NCI1"]
+    models = [GAT]
 
     for dataset_name in datasets:
         for model_class in models:
             run_experiment(dataset_name=dataset_name, model_class=model_class, method="BIPARTITE")
 
 def run_full_training():
-    datasets = ["Mutagenicity", "DHFR", "NCI1", "NCI109", "IMDB-BINARY", "IMDB-MULTI"]
+    datasets = ["NCI1"]
     models = [GIN, GCN, GAT]
 
     results = []
@@ -545,7 +624,7 @@ def run_full_training():
                 result = run_training(
                     dataset_name=dataset_name,
                     model_class=model_class,
-                    hidden_dim=128,
+                    hidden_dim=256,
                     batch_size=32,
                     epoch=300,
                     lr=0.001
@@ -554,7 +633,7 @@ def run_full_training():
                 result = run_training(
                     dataset_name=dataset_name,
                     model_class=model_class,
-                    hidden_dim=128,
+                    hidden_dim=256,
                     batch_size=32,
                     epoch=300,
                     lr=0.001

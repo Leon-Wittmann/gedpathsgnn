@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, GATConv, GINConv, global_mean_pool
+from torch_geometric.nn import GCNConv, GATConv, GINConv, global_mean_pool, global_add_pool
 
 class GCN(nn.Module):
     def __init__(self, in_channels, hidden_channels, num_classes, dropout=0.3):
@@ -99,13 +99,16 @@ class GIN(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, edge_index, batch):
-        x = self.conv1(x, edge_index)
-        x = F.leaky_relu(x)
+        x1 = self.conv1(x, edge_index)
+        x1 = F.leaky_relu(x1)
 
-        x = self.conv2(x, edge_index)
-        x = F.leaky_relu(x)
+        x2 = self.conv2(x1, edge_index)
+        x2 = F.leaky_relu(x2)
 
-        x = global_mean_pool(x, batch)
+        x1 = global_add_pool(x1, batch)
+        x2 = global_add_pool(x2, batch)
+
+        x = x1 + x2
 
         x = self.lin(x)
         x = F.leaky_relu(x)

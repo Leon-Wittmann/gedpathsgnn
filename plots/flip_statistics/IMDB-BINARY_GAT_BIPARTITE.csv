@@ -1,0 +1,3 @@
+number_of_flips,count,nodes_start,edges_start,nodes_target,edges_target,Average GED
+0,4000,20.06 ± 10.79,97.21 ± 97.66,19.60 ± 9.52,97.52 ± 115.94,124.81 ± 139.11
+Total,4000,20.06 ± 10.79,97.21 ± 97.66,19.60 ± 9.52,97.52 ± 115.94,124.81 ± 139.11
