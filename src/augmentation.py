@@ -370,6 +370,8 @@ def run_test_all():
         dataset_1, len1 = graph_augmentation_all(dataset_name=dataset_name, method=method, radius=1, original=original)
         dataset_2, len2 = graph_augmentation_all(dataset_name=dataset_name, method=method, radius=2, original=original)
         dataset_3, len3 = graph_augmentation_all(dataset_name=dataset_name, method=method, radius=3, original=original)
+        dataset_4, len4 = graph_augmentation_all(dataset_name=dataset_name, method=method, radius=4, original=original)
+        dataset_5, len5 = graph_augmentation_all(dataset_name=dataset_name, method=method, radius=5, original=original)
 
         for model_class in models:
             print("Teilweise fertig.")
@@ -377,6 +379,8 @@ def run_test_all():
             results.append(training(dataset_name=dataset_name, method="BIPARTITE", augmentation_method="absolute_all", radius=1, model_class=model_class, original=original, aug_dataset=dataset_1, num_aug=len1))
             results.append(training(dataset_name=dataset_name, method="BIPARTITE", augmentation_method="absolute_all", radius=2, model_class=model_class, original=original, aug_dataset=dataset_2, num_aug=len2))
             results.append(training(dataset_name=dataset_name, method="BIPARTITE", augmentation_method="absolute_all", radius=3, model_class=model_class, original=original, aug_dataset=dataset_3, num_aug=len3))
+            results.append(training(dataset_name=dataset_name, method="BIPARTITE", augmentation_method="absolute_all", radius=4, model_class=model_class, original=original, aug_dataset=dataset_4, num_aug=len4))
+            results.append(training(dataset_name=dataset_name, method="BIPARTITE", augmentation_method="absolute_all", radius=5, model_class=model_class, original=original, aug_dataset=dataset_5, num_aug=len5))
            
 
         df = pd.DataFrame(results)
@@ -408,4 +412,4 @@ def run_test_all_dropout():
         os.makedirs("plots/augmentation", exist_ok=True)
         dfi.export(df, f"plots/augmentation/gnn_augmentation_results_relative_all_dropout_{dataset_name}.png")
 
-run_test_all_dropout()
+run_test_all()

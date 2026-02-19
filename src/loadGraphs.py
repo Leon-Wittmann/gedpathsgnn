@@ -9,9 +9,7 @@ class DataEdgeAttr(Data):
     pass
 
 def build_dataset_paths(method: str, dataset: str):
-    """
-    Dynamische Pfad-Erstellung für data.pt und edit-path-Datei.
-    """
+
     base_dir = os.path.join("data", "Results", method, dataset)
     data_path = os.path.join(base_dir, "processed", "data.pt")
     path_file = os.path.join(base_dir, f"{dataset}_edit_paths_data.txt")

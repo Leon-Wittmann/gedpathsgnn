@@ -160,6 +160,11 @@ def average_first_flip(dataset_name, model_class, method, groups_start_target_la
                     j, i, f"{value:.2f}",
                     ha="center", va="center", color="black"
                 )
+            else:
+                plt.text(
+                    j, i, "None",
+                    ha="center", va="center", color="black"
+                )
 
     output_dir = "plots/average_first_flip"
     os.makedirs(output_dir, exist_ok=True)
@@ -245,11 +250,9 @@ def create_flip_statistic(dataset_name, model_class, method, groups, flip_counts
     plt.savefig(save_path)
     plt.close()
 
-def load_trained_model(model_class, model_path, device=None):
-    if device is None:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def load_trained_model(model_class, model_path):
 
-    checkpoint = torch.load(model_path, map_location=device)
+    checkpoint = torch.load(model_path, map_location=DEVICE)
 
     model = model_class(
         checkpoint["num_node_features"],
@@ -259,6 +262,11 @@ def load_trained_model(model_class, model_path, device=None):
 
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
+
+    print("Loaded model:")
+    print("  node_features:", checkpoint["num_node_features"])
+    print("  hidden_dim:", checkpoint["hidden_dim"])
+    print("  num_classes:", checkpoint["num_classes"])
 
     return model, checkpoint
 
@@ -459,6 +467,42 @@ def analyze_operations(dataset_name, model_class, method, result_list):
     plt.savefig(save_path)
     plt.close()
 
+def analyze_intensity(dataset_name, model_class, method, result_list):
+    total_flip_intensity = 0.0
+    total_flips = 0
+
+    for path in result_list:
+        total_flip_intensity += path.sum_flip_intensity
+        total_flips += path.number_of_flips
+    
+    if total_flips > 0:
+        average_flip_intensity = total_flip_intensity / total_flips
+    else:
+        average_flip_intensity = 0.0
+
+    output_dir = os.path.join("plots", "intensity")
+    os.makedirs(output_dir, exist_ok=True)
+    
+    csv_path = os.path.join(output_dir, "average_flip_intensity.csv")
+    
+    file_exists = os.path.isfile(csv_path)
+    
+    with open(csv_path, mode="a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["dataset", "model_class", "method", "average_flip_intensity", "total_flips"])
+        
+        if not file_exists:
+            writer.writeheader()
+        
+        writer.writerow({
+            "dataset": dataset_name,
+            "model_class": model_class.__name__,
+            "method": method,
+            "average_flip_intensity": average_flip_intensity,
+            "total_flips": total_flips
+        })
+    
+    print(f"Saved/updated: {csv_path}")
+
 def analyze_results(dataset_name, model_class, method, result_list):
     flip_counts = []
 
@@ -466,7 +510,7 @@ def analyze_results(dataset_name, model_class, method, result_list):
     groups_start_target_label = defaultdict(list) 
 
     for i, ep in enumerate(result_list):    
-        ep.countFlips()
+        ep.calculate_sum_flip_intensity()
         ep.analyzeStartTargetGraphs()
         ep.readGED()
         ep.doFirstFlip()
@@ -474,6 +518,7 @@ def analyze_results(dataset_name, model_class, method, result_list):
         groups[ep.number_of_flips].append(ep)
         groups_start_target_label[(ep.start_graph_label, ep.target_graph_label)].append(ep.first_flip_relative)
 
+    analyze_intensity(dataset_name=dataset_name, model_class=model_class, method=method, result_list=result_list)
     average_first_flip(dataset_name=dataset_name, model_class=model_class, method=method, groups_start_target_label=groups_start_target_label)
     create_flip_statistic(dataset_name=dataset_name, model_class=model_class, method=method, groups=groups, flip_counts=flip_counts)
     analyze_operations(dataset_name=dataset_name, model_class=model_class, method=method, result_list=result_list)
@@ -483,6 +528,7 @@ def run_experiment(dataset_name, model_class, method):
 
     model_path = f"models/{dataset_name}_{model_class.__name__}.pt"
     model, ckpt = load_trained_model(model_class=model_class, model_path=model_path)
+    model.eval()
     graphs, steps = load_graphs_from_pt(method=method, dataset=dataset_name)
     dataset = TUDataset(root="./data", name=dataset_name)
     count_ones = 0
@@ -493,7 +539,8 @@ def run_experiment(dataset_name, model_class, method):
     result_list.append(EditPath(start_graph_id=graphs[0].edit_path_start.item(), target_graph_id=graphs[0].edit_path_end.item(), dataset_name=dataset_name, method=method, dataset=dataset))
     new_path = True
     loader = DataLoader(graphs, batch_size=128, shuffle=False)
-
+    test=0
+    test2=0
     for batch_data in loader:
         batch_data = batch_data.to(DEVICE)
 
@@ -501,14 +548,16 @@ def run_experiment(dataset_name, model_class, method):
             num_features_model = model.conv1.nn[0].in_features
         else:
             num_features_model = model.conv1.in_channels
-        graph_features = batch_data.x[:, -num_features_model:].float()
+        
+        graph_features = batch_data.x[:, -num_features_model:]
 
         with torch.no_grad():
             out = model(graph_features, batch_data.edge_index, batch_data.batch)
 
         preds = out.argmax(dim=1).cpu().tolist()
+        probs = torch.softmax(out, dim=1)
 
-        for pred_class in preds:
+        for i, pred_class in enumerate(preds):
             graph = graphs[global_id]
 
             if global_id > 0:
@@ -523,6 +572,7 @@ def run_experiment(dataset_name, model_class, method):
             step = steps[global_id - path_id - 1]
             
             result_list[path_id].prediction.append(pred_class)
+            result_list[path_id].logits.append(probs[i].detach().cpu().numpy())
             result_list[path_id].num_components.append(get_num_components(graph))
             result_list[path_id].num_circles.append(get_num_k_circles(graph, 6))
         
@@ -535,7 +585,7 @@ def run_experiment(dataset_name, model_class, method):
                 count_zeros += 1
 
             global_id += 1
-
+            
         print(global_id, "/", len(graphs))
 
     count_correct_00 = 0
@@ -568,7 +618,8 @@ def run_experiment(dataset_name, model_class, method):
     print(count_correct_11, count_correct_11_total)
     print(count_correct_01, count_correct_01_total)
     print(count_correct_10, count_correct_10_total)
-
+    print(test)
+    print(test2)
     analyze_results(dataset_name=dataset_name, model_class=model_class, method=method, result_list=result_list)
 
 def save_dataframe_as_image(df, filename="gnn_results.png", dpi=300):
@@ -604,8 +655,8 @@ def test(dataset_name, method):
         print(dataset[i].edit_path_start.item(), dataset[i].edit_path_end.item(), dataset[i].edit_path_step.item())
 
 def run_full_experiment():
-    datasets = ["NCI1"]
-    models = [GAT]
+    datasets = ["Mutagenicity", "DHFR", "NCI1", "NCI109", "IMDB-BINARY", "IMDB-MULTI"]
+    models = [GIN, GCN, GAT]
 
     for dataset_name in datasets:
         for model_class in models:

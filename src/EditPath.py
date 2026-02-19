@@ -1,6 +1,7 @@
 from torch_geometric.datasets import TUDataset
 import csv
 import os
+import numpy as np
 
 class EditPath:
     def __init__(self, start_graph_id, target_graph_id, dataset_name, method, dataset):
@@ -10,6 +11,7 @@ class EditPath:
         self.method = method
         self.dataset = dataset
         self.prediction = []
+        self.logits = []
         self.length = 0
         self.number_of_flips = 0
         self.first_flip_relative = None
@@ -23,12 +25,15 @@ class EditPath:
         self.operations = []
         self.num_components = []
         self.num_circles = []
-        
+        self.sum_flip_intensity = 0
+
+    """   
     def countFlips(self):
         for i, pr in enumerate(self.prediction):
             if(i > 0):
                 if(self.prediction[i-1] != self.prediction[i]):
                     self.number_of_flips += 1
+    """                
 
     def analyzeStartTargetGraphs(self):
         self.number_of_nodes_start = self.dataset[self.start_graph_id].num_nodes
@@ -58,3 +63,11 @@ class EditPath:
             self.first_flip_relative = None
 
 
+    def calculate_sum_flip_intensity(self):
+        for i, pr in enumerate(self.prediction):
+            if(i > 0):
+                if(self.prediction[i-1] != self.prediction[i]):
+                    self.number_of_flips += 1
+                    self.sum_flip_intensity += np.abs(self.logits[i] - self.logits[i-1])
+        
+        
